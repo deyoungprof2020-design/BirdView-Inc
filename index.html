@@ -320,6 +320,7 @@
     const firebaseConfig = {
       apiKey: "AIzaSyAvaDuz1OCKYuDfieZiHynhYkur9KOPY00",
       authDomain: "birdview-025802.firebaseapp.com",
+      databaseURL: "https://birdview-025802-default-rtdb.firebaseio.com/",
       projectId: "birdview-025802",
       storageBucket: "birdview-025802.firebasestorage.app",
       messagingSenderId: "607338097846",
@@ -482,6 +483,9 @@
         .then(() => {
           reviewEndTime = Date.now() + (1 * 60 * 1000) + (30 * 1000); // 1 min 30 sec
           startReviewTimer();
+        })
+        .catch(err => {
+          alert("Failed to save your questions. Please try again.\n" + err.message);
         });
     }
 
@@ -521,32 +525,37 @@
       updateTimer();
     }
 
+    // Step 1: Improved Real-Time Sync (Listener instead of polling)
+    let questionsListener = null;
     function startAnswering() {
       document.getElementById('question-section').classList.add('hidden');
       document.getElementById('answer-section').classList.remove('hidden');
       document.getElementById('waiting-section').classList.remove('hidden');
       document.getElementById('waiting-answers').classList.remove('hidden');
       startWaitingTimer();
-      // Fetch all question sets in this room except this player's
-      function pollForOtherPlayerQuestions() {
-        db.ref(`rooms/${roomCode}/questions`).once('value').then(snap => {
-          const all = snap.val();
-          if (!all) {
-            setTimeout(pollForOtherPlayerQuestions, 2000);
-            return;
-          }
-          const otherPlayer = Object.keys(all).find(name => name !== playerName);
-          if (!otherPlayer) {
-            setTimeout(pollForOtherPlayerQuestions, 2000);
-            return;
-          }
+      // Remove previous listener if any
+      if (questionsListener) {
+        questionsListener.off();
+        questionsListener = null;
+      }
+      // Set up a real-time listener for other player's questions
+      const questionsRef = db.ref(`rooms/${roomCode}/questions`);
+      questionsListener = questionsRef;
+      questionsRef.on('value', function(snap) {
+        const all = snap.val();
+        if (!all) return;
+        const otherPlayer = Object.keys(all).find(name => name !== playerName);
+        if (otherPlayer) {
           const qs = all[otherPlayer];
           document.getElementById('waiting-section').classList.add('hidden');
           document.getElementById('waiting-answers').classList.add('hidden');
           showQuestionsToAnswer(qs, otherPlayer);
-        });
-      }
-      pollForOtherPlayerQuestions();
+          // Remove listener after we've received the questions (to avoid repeat triggers)
+          questionsRef.off('value');
+        }
+      }, function(error) {
+        alert("Error listening for other player's questions: " + error.message);
+      });
     }
 
     function showQuestionsToAnswer(qs, otherPlayer) {
@@ -584,6 +593,9 @@
         const otherPlayer = document.getElementById('answer-container').getAttribute('data-other-player');
         const qs = all && all[otherPlayer];
         calculateResults(answers, qs, otherPlayer, all);
+        document.getElementById('waiting-answers').classList.add('hidden');
+      }).catch(err => {
+        alert("Failed to load questions from database. Please try again.\n" + err.message);
         document.getElementById('waiting-answers').classList.add('hidden');
       });
     }
@@ -629,16 +641,52 @@
           document.getElementById('result-output').innerHTML =
             `<h4>${playerName || 'You'}, you scored ${percent}% - ${tag}</h4>${breakdown}` +
             (otherScoreHTML ? `<hr><h4>Comparison:</h4>${otherScoreHTML}${otherBreakdownHTML}` : "");
+          // Step 4: Data Cleanup - remove room data after both answered
+          attemptRoomCleanup(all, playerName, otherPlayer);
+        }).catch(err => {
+          alert("Failed to load the other player's answers for comparison. " + err.message);
+          document.getElementById('result-section').classList.remove('hidden');
+          document.getElementById('answer-section').classList.add('hidden');
+          document.getElementById('result-output').innerHTML =
+            `<h4>${playerName || 'You'}, you scored ${percent}% - ${tag}</h4>${breakdown}`;
+          attemptRoomCleanup(all, playerName, otherPlayer);
         });
       } else {
         document.getElementById('result-section').classList.remove('hidden');
         document.getElementById('answer-section').classList.add('hidden');
         document.getElementById('result-output').innerHTML =
           `<h4>${playerName || 'You'}, you scored ${percent}% - ${tag}</h4>${breakdown}`;
+        attemptRoomCleanup(all, playerName, otherPlayer);
       }
 
       // Save your answers (for comparison display for other player)
-      db.ref(`rooms/${roomCode}/answers/${playerName}`).set(answers);
+      db.ref(`rooms/${roomCode}/answers/${playerName}`).set(answers).catch(err => {
+        alert("Failed to save your answers. Please try again.\n" + err.message);
+      });
+    }
+
+    // Step 4: Data Cleanup - remove old game data after both players finished
+    function attemptRoomCleanup(allQuestions, playerName, otherPlayer) {
+      // Check if both players have submitted their answers
+      db.ref(`rooms/${roomCode}/answers`).once('value').then(snap => {
+        const answers = snap.val();
+        if (!answers) return;
+        const playerNames = [playerName, otherPlayer];
+        const bothAnswered = playerNames.every(n => answers[n] && Array.isArray(answers[n]));
+        if (bothAnswered) {
+          // Wait 8 seconds before deleting to ensure both see their results
+          setTimeout(() => {
+            db.ref(`rooms/${roomCode}`).remove()
+              .catch(err => {
+                // Not critical, just log
+                console.error("Failed to clean up game room: " + err.message);
+              });
+          }, 8000);
+        }
+      }).catch(err => {
+        // Not critical, just log
+        console.error("Error checking answers for cleanup: " + err.message);
+      });
     }
 
     function getLevelTag(p) {
